@@ -1,0 +1,28 @@
+# Build Rust
+/target/
+
+# Dados baixados / gerados (parquet, microstructure)
+/data/
+
+# Resultados de experimentos e backtests
+/results/
+
+# Segredos locais
+.env
+.env.local
+*.pem
+
+# Logs
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Node (caso o frontend use)
+node_modules/
+dist/

@@ -1,0 +1,39 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quant-engine"
+path = "src/main.rs"
+
+[dependencies]
+domain.workspace = true
+market-data.workspace = true
+strategies.workspace = true
+risk.workspace = true
+portfolio.workspace = true
+execution.workspace = true
+persistence.workspace = true
+analytics.workspace = true
+backtest.workspace = true
+strategy-judge.workspace = true
+features.workspace = true
+
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+sqlx.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true

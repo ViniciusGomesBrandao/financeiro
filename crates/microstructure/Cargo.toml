@@ -1,0 +1,49 @@
+[package]
+name = "microstructure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "collect-microstructure"
+path = "src/bin/collect_microstructure.rs"
+
+[[bin]]
+name = "replay-microstructure"
+path = "src/bin/replay_microstructure.rs"
+
+[[bin]]
+name = "compact-microstructure"
+path = "src/bin/compact_microstructure.rs"
+
+[[bin]]
+name = "build-feature-grid"
+path = "src/bin/build_feature_grid.rs"
+
+[[bin]]
+name = "analyze-signals"
+path = "src/bin/analyze_signals.rs"
+
+[dependencies]
+domain.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+futures-util.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+parquet.workspace = true
+arrow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true

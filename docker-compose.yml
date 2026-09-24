@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: quant
+      POSTGRES_PASSWORD: quant
+      POSTGRES_DB: quant_engine
+    ports:
+      # Porta do host deliberadamente incomum (não a 5432 padrão do
+      # Postgres): a 5432 é comum o bastante para colidir com outra
+      # instância local de Postgres ou de outro projeto na mesma máquina.
+      # A porta interna do container continua 5432 — só o mapeamento
+      # externo muda.
+      - "55432:5432"
+    volumes:
+      - quant_engine_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quant -d quant_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  quant_engine_postgres_data:

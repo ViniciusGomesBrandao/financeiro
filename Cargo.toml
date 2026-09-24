@@ -1,0 +1,87 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/market-data",
+    "crates/strategies",
+    "crates/risk",
+    "crates/portfolio",
+    "crates/execution",
+    "crates/persistence",
+    "crates/analytics",
+    "crates/features",
+    "crates/backtest",
+    "crates/app",
+    "crates/web",
+    "crates/historical-data",
+    "crates/experiments",
+    "crates/microstructure",
+    "crates/strategy-judge",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP / WebSocket
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+axum = "0.8"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "rust_decimal", "chrono", "uuid", "migrate"] }
+
+# Numerics / time / ids
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+# Errors / logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config
+dotenvy = "0.15"
+clap = { version = "4", features = ["derive"] }
+
+# Dados históricos (Parquet)
+parquet = { version = "53", default-features = false, features = ["arrow", "flate2", "snap"] }
+arrow = "53"
+
+# Workspace crates
+domain = { path = "crates/domain" }
+market-data = { path = "crates/market-data" }
+strategies = { path = "crates/strategies" }
+risk = { path = "crates/risk" }
+portfolio = { path = "crates/portfolio" }
+execution = { path = "crates/execution" }
+persistence = { path = "crates/persistence" }
+analytics = { path = "crates/analytics" }
+features = { path = "crates/features" }
+backtest = { path = "crates/backtest" }
+web = { path = "crates/web" }
+historical-data = { path = "crates/historical-data" }
+microstructure = { path = "crates/microstructure" }
+strategy-judge = { path = "crates/strategy-judge" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
