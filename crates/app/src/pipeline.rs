@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::robot_market::RobotMarketView;
 use crate::robot_runtime::RobotContext;
+use crate::robot_sync::{self, HotReload};
 use crate::strategy_switch::{self, ActiveStrategyTracker};
 
 /// Aquecimento por robô: cada instância só recebe candles do **seu** timeframe.
@@ -120,11 +121,15 @@ pub async fn seed_judge_after_warmup(
 
 /// Pipeline live multi-robô: cada candle só alimenta robôs cujo
 /// `(instrument, timeframe)` coincide; cada robô tem portfolio e Judge próprios.
+///
+/// Se `hot_reload` for `Some`, a cada ~2s sincroniza robôs `running` do
+/// Postgres (criar/startar no dashboard passa a valer sem reiniciar o
+/// processo).
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut rx: mpsc::UnboundedReceiver<MarketEvent>,
-    instruments: &HashMap<InstrumentId, Instrument>,
-    robots: &[RobotContext],
+    instruments: &mut HashMap<InstrumentId, Instrument>,
+    robots: &mut Vec<RobotContext>,
     registry: &mut StrategyRegistry,
     tracker: &mut ActiveStrategyTracker,
     risk_engine: &RiskEngine,
@@ -132,9 +137,14 @@ pub async fn run(
     portfolios: &mut HashMap<String, PortfolioManager>,
     market_views: &mut HashMap<String, RobotMarketView>,
     pool: &PgPool,
+    mut hot_reload: Option<HotReload<'_>>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     let mut mark_prices: HashMap<InstrumentId, rust_decimal::Decimal> = HashMap::new();
+    let mut sync_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Primeiro tick é imediato — pula para não competir com o warm-up.
+    sync_tick.tick().await;
 
     loop {
         let event = tokio::select! {
@@ -142,6 +152,25 @@ pub async fn run(
             _ = &mut shutdown => {
                 info!("shutdown signal received, stopping pipeline");
                 break;
+            }
+            _ = sync_tick.tick(), if hot_reload.is_some() => {
+                if let Some(hot) = hot_reload.as_mut() {
+                    if let Err(err) = robot_sync::sync_from_database(
+                        hot,
+                        instruments,
+                        robots,
+                        registry,
+                        tracker,
+                        portfolios,
+                        market_views,
+                        pool,
+                    )
+                    .await
+                    {
+                        warn!(error = %err, "hot-reload sync failed");
+                    }
+                }
+                continue;
             }
             event = rx.recv() => match event {
                 Some(event) => event,
@@ -158,7 +187,7 @@ pub async fn run(
         if !candle.is_closed {
             continue;
         }
-        let Some(instrument) = instruments.get(&candle.instrument_id) else {
+        let Some(instrument) = instruments.get(&candle.instrument_id).cloned() else {
             continue;
         };
 
@@ -177,12 +206,13 @@ pub async fn run(
             "market event: candle closed"
         );
 
-        let matching: Vec<&RobotContext> = robots
+        let matching_ids: Vec<String> = robots
             .iter()
             .filter(|r| r.instrument_id == candle.instrument_id && r.timeframe == candle.timeframe)
+            .map(|r| r.id.clone())
             .collect();
 
-        if matching.is_empty() {
+        if matching_ids.is_empty() {
             debug!(
                 symbol = %instrument.symbol,
                 timeframe = %candle.timeframe,
@@ -197,7 +227,13 @@ pub async fn run(
                 .into_iter()
                 .collect();
 
-        for robot in matching {
+        for robot_id in matching_ids {
+            let Some(robot_idx) = robots.iter().position(|r| r.id == robot_id) else {
+                continue;
+            };
+            // Clone curto para soltar o borrow em `robots` antes de mutar
+            // portfolios/registry.
+            let robot = robots[robot_idx].clone();
             let Some(portfolio) = portfolios.get_mut(&robot.id) else {
                 warn!(robot_id = %robot.id, "portfolio missing for robot; skipping candle");
                 continue;
@@ -206,8 +242,8 @@ pub async fn run(
             let market_view = market_views.get_mut(&robot.id);
             process_robot_candle(
                 candle,
-                instrument,
-                robot,
+                &instrument,
+                &robot,
                 registry,
                 tracker,
                 risk_engine,
@@ -301,9 +337,11 @@ async fn process_robot_candle(
             continue;
         }
         if !strategy_switch::signal_allowed(&active_strategy_update, &signal) {
-            debug!(
+            info!(
                 strategy_id = %signal.strategy_id,
                 robot_id = %robot.id,
+                selected = ?active_strategy_update.selected.as_ref().map(|s| s.as_str()),
+                direction = ?signal.direction,
                 "strategy judge: signal blocked for this robot"
             );
             continue;

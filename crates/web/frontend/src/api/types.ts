@@ -29,6 +29,7 @@ export type OpenPosition = {
 }
 
 export type Trade = {
+  id?: string
   symbol: string
   strategy_id: string
   side: string
@@ -42,6 +43,10 @@ export type Trade = {
   spread_paid: string
   slippage_paid: string
   pnl_net: string
+  exit_trigger?: string | null
+  exit_reason?: string | null
+  entry_direction?: string | null
+  entry_confidence?: number | null
 }
 
 export type StrategyPerformance = {
@@ -169,13 +174,40 @@ export type JudgeDecisionJson = {
   }
 }
 
+/** Payload persistido do Judge (v1 = array; v2 = objeto com regime/selection/decisions). */
+export type JudgeEvaluationPayload =
+  | JudgeDecisionJson[]
+  | {
+      version?: number
+      regime?: {
+        kind?: string
+        strength?: number
+        summary?: string
+        rule?: string
+      }
+      selection_reason?: {
+        kind?: string
+        summary?: string
+        regime?: string
+        strategy_kind?: string
+        fit_score?: number
+      }
+      candidate_fits?: Array<{
+        strategy_id?: string
+        strategy_kind?: string
+        fit_score?: number
+        economic_state?: string
+      }>
+      decisions?: JudgeDecisionJson[]
+    }
+
 export type JudgeEvaluation = {
   id: string
   symbol: string
   robot_id: string | null
   evaluated_at: string
   selected_strategy_id: string | null
-  decisions: JudgeDecisionJson[]
+  decisions: JudgeEvaluationPayload
 }
 
 export type StrategySwitch = {
@@ -193,12 +225,20 @@ export type PnlCurvePoint = {
   cumulative_pnl: string
 }
 
+export type EquityCurvePoint = {
+  at: string
+  equity: string
+  cash: string
+  return_pct: string
+}
+
 export type RobotDetail = {
   robot: OperationalRobot
   trades: Trade[]
   evaluations: JudgeEvaluation[]
   switches: StrategySwitch[]
   realized_pnl_curve: PnlCurvePoint[]
+  equity_curve: EquityCurvePoint[]
   candidate_performance: StrategyPerformance[]
 }
 

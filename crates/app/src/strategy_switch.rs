@@ -126,24 +126,45 @@ impl ActiveStrategyTracker {
     }
 }
 
-/// Um sinal `Long` só é permitido quando vem da estratégia selecionada.
+/// Um sinal `Long` só é permitido quando vem da estratégia selecionada —
+/// **exceto no bootstrap** (todas / a selecionada ainda em
+/// `InsufficientSample`): aí qualquer candidata não bloqueada
+/// economicamente pode abrir, senão o Judge escolhe p.ex. `ema_crossover`
+/// e o robô fica sem trades enquanto `mean_reversion` geraria Longs.
 pub fn signal_allowed(update: &ActiveStrategyUpdate, signal: &Signal) -> bool {
     if !matches!(signal.direction, SignalDirection::Long) {
         return true;
     }
-    if let Some(selected) = &update.selected {
-        return selected == &signal.strategy_id;
+
+    let decision_for =
+        |id: &StrategyId| update.decisions.iter().find(|d| &d.strategy_id == id);
+
+    let is_bootstrap = |d: &JudgeDecision| {
+        matches!(d.reason, JudgeReason::InsufficientSample { .. })
+    };
+
+    let selected_in_bootstrap = update
+        .selected
+        .as_ref()
+        .and_then(decision_for)
+        .is_some_and(is_bootstrap);
+
+    let all_in_bootstrap = !update.decisions.is_empty()
+        && update.decisions.iter().all(is_bootstrap);
+
+    // Sem amostra ainda: não restringe à "preferida" do Judge — precisa
+    // gerar os primeiros trades para o próprio Judge avaliar.
+    if update.selected.is_none() || selected_in_bootstrap || all_in_bootstrap {
+        return match decision_for(&signal.strategy_id) {
+            Some(decision) if decision.state == JudgeState::Disabled => is_bootstrap(decision),
+            _ => true,
+        };
     }
-    match update
-        .decisions
-        .iter()
-        .find(|d| d.strategy_id == signal.strategy_id)
-    {
-        Some(decision) if decision.state == JudgeState::Disabled => {
-            matches!(decision.reason, JudgeReason::InsufficientSample { .. })
-        }
-        _ => true,
-    }
+
+    update
+        .selected
+        .as_ref()
+        .is_some_and(|selected| selected == &signal.strategy_id)
 }
 
 #[cfg(test)]
@@ -342,6 +363,43 @@ mod tests {
         assert!(signal_allowed(
             &update,
             &signal("robot-a", instrument, SignalDirection::Long)
+        ));
+    }
+
+    /// O Judge contextual escolhe uma candidata mesmo no bootstrap
+    /// (`selected = Some`), mas isso é só ranking de afinidade — ainda
+    /// sem trades. Outras estratégias com `InsufficientSample` devem
+    /// poder abrir Long; senão o robô trava sem ordens.
+    #[test]
+    fn bootstrap_selected_strategy_does_not_block_other_longs() {
+        let instrument = InstrumentId::new();
+        let decisions = vec![
+            decision(
+                "ema_crossover",
+                JudgeState::Disabled,
+                JudgeReason::InsufficientSample {
+                    trades: 0,
+                    required: 10,
+                },
+            ),
+            decision(
+                "mean_reversion",
+                JudgeState::Disabled,
+                JudgeReason::InsufficientSample {
+                    trades: 0,
+                    required: 10,
+                },
+            ),
+        ];
+        let update = update_with(instrument, Some("ema_crossover"), decisions);
+
+        assert!(signal_allowed(
+            &update,
+            &signal("ema_crossover", instrument, SignalDirection::Long)
+        ));
+        assert!(signal_allowed(
+            &update,
+            &signal("mean_reversion", instrument, SignalDirection::Long)
         ));
     }
 

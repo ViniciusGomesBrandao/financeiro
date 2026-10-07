@@ -114,33 +114,74 @@ pub async fn get_robot_detail(
         &price_by_instrument,
     );
 
+    let timeline = persistence::risk_decisions::list_timeline(&state.pool, 500).await?;
     let mut trades: Vec<TradeDto> = all_trades
         .into_iter()
         .filter(|t| instance_ids.iter().any(|i| i == t.strategy_id.as_str()))
         .take(100)
-        .map(|trade| TradeDto {
-            symbol: symbols
-                .get(&trade.instrument_id)
-                .cloned()
-                .unwrap_or_else(|| "?".to_string()),
-            strategy_id: trade.strategy_id.as_str().to_string(),
-            side: format!("{:?}", trade.side),
-            quantity: trade.quantity,
-            entry_price: trade.entry_price,
-            exit_price: trade.exit_price,
-            opened_at: trade.opened_at,
-            closed_at: trade.closed_at,
-            pnl_gross: trade.pnl_gross,
-            fees_paid: trade.fees_paid,
-            spread_paid: trade.spread_paid,
-            slippage_paid: trade.slippage_paid,
-            pnl_net: trade.pnl_net,
+        .map(|trade| {
+            let sid = trade.strategy_id.as_str();
+            let exit = timeline.iter().find(|e| {
+                e.strategy_id == sid
+                    && e.approved
+                    && e.created_at == trade.closed_at
+                    && (e.trigger == "strategy_switch"
+                        || e.trigger == "stop_loss"
+                        || e.trigger == "take_profit"
+                        || (e.trigger == "signal"
+                            && e.signal_direction
+                                .as_deref()
+                                .is_some_and(|d| d == "short" || d == "flat")))
+            });
+            let entry = timeline.iter().find(|e| {
+                e.strategy_id == sid
+                    && e.approved
+                    && e.trigger == "signal"
+                    && e.created_at == trade.opened_at
+                    && e.signal_direction.as_deref() == Some("long")
+            });
+            TradeDto {
+                id: Some(trade.id),
+                symbol: symbols
+                    .get(&trade.instrument_id)
+                    .cloned()
+                    .unwrap_or_else(|| "?".to_string()),
+                strategy_id: sid.to_string(),
+                side: format!("{:?}", trade.side),
+                quantity: trade.quantity,
+                entry_price: trade.entry_price,
+                exit_price: trade.exit_price,
+                opened_at: trade.opened_at,
+                closed_at: trade.closed_at,
+                pnl_gross: trade.pnl_gross,
+                fees_paid: trade.fees_paid,
+                spread_paid: trade.spread_paid,
+                slippage_paid: trade.slippage_paid,
+                pnl_net: trade.pnl_net,
+                exit_trigger: exit.map(|e| e.trigger.clone()),
+                exit_reason: exit.and_then(|e| e.reason.clone()),
+                entry_direction: entry.and_then(|e| e.signal_direction.clone()),
+                entry_confidence: entry.and_then(|e| e.signal_confidence),
+            }
         })
         .collect();
     // list_all já vem DESC; curva precisa ASC
     trades.sort_by_key(|a| a.closed_at);
     let realized_pnl_curve = cumulative_pnl_curve(&trades);
     trades.reverse();
+
+    let equity_snaps =
+        persistence::robot_portfolio_snapshots::list_recent_for_robot(&state.pool, &id, 240)
+            .await?;
+    let equity_curve: Vec<crate::dto::EquityCurvePointDto> = equity_snaps
+        .into_iter()
+        .map(|s| crate::dto::EquityCurvePointDto {
+            at: s.snapshot.timestamp,
+            equity: s.snapshot.equity,
+            cash: s.snapshot.cash,
+            return_pct: s.snapshot.return_pct,
+        })
+        .collect();
 
     let mut candidate_performance: Vec<StrategyPerformanceDto> = instance_ids
         .iter()
@@ -205,6 +246,7 @@ pub async fn get_robot_detail(
         evaluations: eval_dtos,
         switches: switch_dtos,
         realized_pnl_curve,
+        equity_curve,
         candidate_performance,
     }))
 }
@@ -530,7 +572,11 @@ fn enrich_robot(
         max_drawdown: performance.max_drawdown,
         created_at: robot.created_at,
         updated_at: robot.updated_at,
-        engine_restart_required: robot.status == RobotStatus::Running,
+        // Hot-reload: o motor sincroniza robôs `running` em ~2s. Sem snapshot/
+        // avaliação ainda, a UI pede paciência — não restart.
+        engine_restart_required: robot.status == RobotStatus::Running
+            && snapshot.is_none()
+            && active.is_none(),
     }
 }
 
@@ -789,6 +835,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
         let trades = vec![
             TradeDto {
+                id: None,
                 symbol: "BTC/USDT".into(),
                 strategy_id: "a".into(),
                 side: "Buy".into(),
@@ -802,8 +849,13 @@ mod tests {
                 spread_paid: Decimal::ZERO,
                 slippage_paid: Decimal::ZERO,
                 pnl_net: Decimal::new(10, 0),
+                exit_trigger: None,
+                exit_reason: None,
+                entry_direction: None,
+                entry_confidence: None,
             },
             TradeDto {
+                id: None,
                 symbol: "BTC/USDT".into(),
                 strategy_id: "a".into(),
                 side: "Buy".into(),
@@ -817,6 +869,10 @@ mod tests {
                 spread_paid: Decimal::ZERO,
                 slippage_paid: Decimal::ZERO,
                 pnl_net: Decimal::new(-3, 0),
+                exit_trigger: None,
+                exit_reason: None,
+                entry_direction: None,
+                entry_confidence: None,
             },
         ];
         let curve = cumulative_pnl_curve(&trades);

@@ -52,13 +52,27 @@ pub fn group_instruments_by_timeframe(
     out
 }
 
-/// Mescla vários receivers em um único canal (um stream WS por timeframe).
-pub fn merge_market_event_streams(
-    receivers: Vec<tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent>>,
-) -> tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    for mut recv in receivers {
-        let tx = tx.clone();
+/// Fan-in dinâmico de streams WS: permite anexar novos receivers em runtime
+/// quando um robô hot-load precisa de um símbolo/timeframe ainda não coberto.
+pub struct MarketEventHub {
+    tx: tokio::sync::mpsc::UnboundedSender<domain::MarketEvent>,
+}
+
+impl MarketEventHub {
+    pub fn new() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
+    /// Encaminha todos os eventos de `recv` para o canal compartilhado.
+    pub fn attach(
+        &self,
+        mut recv: tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent>,
+    ) {
+        let tx = self.tx.clone();
         tokio::spawn(async move {
             while let Some(event) = recv.recv().await {
                 if tx.send(event).is_err() {
@@ -67,6 +81,18 @@ pub fn merge_market_event_streams(
             }
         });
     }
+}
+
+/// Mescla vários receivers em um único canal (um stream WS por timeframe).
+pub fn merge_market_event_streams(
+    receivers: Vec<tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent>>,
+) -> tokio::sync::mpsc::UnboundedReceiver<domain::MarketEvent> {
+    let (hub, rx) = MarketEventHub::new();
+    for recv in receivers {
+        hub.attach(recv);
+    }
+    // Mantém o hub vivo enquanto os forwards rodarem (clonam o tx).
+    std::mem::forget(hub);
     rx
 }
 

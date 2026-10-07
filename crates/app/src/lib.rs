@@ -9,5 +9,6 @@ pub mod judge_codec;
 pub mod pipeline;
 pub mod robot_market;
 pub mod robot_runtime;
+pub mod robot_sync;
 pub mod setup;
 pub mod strategy_switch;

@@ -42,6 +42,26 @@ export function fmtDuration(iso: string | null | undefined): string {
   return `${minutes}m`
 }
 
+export function fmtHold(openedAt: string, closedAt: string): string {
+  const ms = new Date(closedAt).getTime() - new Date(openedAt).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return '—'
+  const totalMinutes = Math.max(0, Math.round(ms / 60000))
+  if (totalMinutes < 1) return '<1m'
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+export function fmtClock(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleTimeString('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
 export function signTone(
   v: string | number | null | undefined,
 ): 'positive' | 'negative' | 'neutral' {
@@ -70,6 +90,7 @@ export const TRIGGER_LABEL: Record<string, string> = {
   signal: 'sinal de estratégia',
   stop_loss: 'stop loss',
   take_profit: 'take profit',
+  strategy_switch: 'estratégia destituída / troca',
 }
 
 export const SIDE_LABEL: Record<string, string> = {

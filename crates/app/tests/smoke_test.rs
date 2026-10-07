@@ -239,7 +239,7 @@ async fn binance_to_signal_to_risk_to_paper_execution_to_portfolio_to_postgres()
     let mut instrument_index = HashMap::new();
     instrument_index.insert(instrument.id, instrument.clone());
 
-    let robots = vec![app::robot_runtime::RobotContext {
+    let mut robots = vec![app::robot_runtime::RobotContext {
         id: "smoke-robot".to_string(),
         instrument_id: instrument.id,
         symbol: instrument.symbol.to_string(),
@@ -252,8 +252,8 @@ async fn binance_to_signal_to_risk_to_paper_execution_to_portfolio_to_postgres()
 
     pipeline::run(
         event_rx,
-        &instrument_index,
-        &robots,
+        &mut instrument_index,
+        &mut robots,
         &mut registry,
         &mut tracker,
         &risk_engine,
@@ -261,25 +261,28 @@ async fn binance_to_signal_to_risk_to_paper_execution_to_portfolio_to_postgres()
         &mut portfolios,
         &mut market_views,
         &pool,
+        None,
         shutdown_rx,
     )
     .await
     .expect("pipeline::run should complete cleanly once the event channel closes");
 
     // --- Verifica o estado da carteira em memória -------------------------
-    let portfolio = portfolios.get("smoke-robot").unwrap();
-    assert_eq!(
-        portfolio.open_positions().len(),
-        1,
-        "expected exactly one open position after the synthetic bullish crossover"
-    );
-    let position = &portfolio.open_positions()[0];
-    assert_eq!(position.side, Side::Buy);
-    assert_eq!(position.status, PositionStatus::Open);
-    assert!(
-        portfolio.cash().value() < dec!(100000),
-        "cash must have been debited by the paper buy"
-    );
+    {
+        let portfolio = portfolios.get("smoke-robot").unwrap();
+        assert_eq!(
+            portfolio.open_positions().len(),
+            1,
+            "expected exactly one open position after the synthetic bullish crossover"
+        );
+        let position = &portfolio.open_positions()[0];
+        assert_eq!(position.side, Side::Buy);
+        assert_eq!(position.status, PositionStatus::Open);
+        assert!(
+            portfolio.cash().value() < dec!(100000),
+            "cash must have been debited by the paper buy"
+        );
+    }
 
     // --- Verifica que as linhas chegaram ao Postgres real -----------------
     let persisted_instrument = persistence::instruments::find_by_id(&pool, instrument.id)
@@ -347,7 +350,11 @@ async fn binance_to_signal_to_risk_to_paper_execution_to_portfolio_to_postgres()
     // por inconsistência — a invariante é "no máximo uma aberta por
     // (instrumento, estratégia)" (ADR-20), e este teste usa uma única
     // estratégia.
-    let mark = position.entry_price;
+    let mark = {
+        let portfolio = portfolios.get("smoke-robot").unwrap();
+        portfolio.open_positions()[0].entry_price
+    };
+    let portfolio = portfolios.get_mut("smoke-robot").unwrap();
     let closed = portfolio
         .close_position(
             instrument.id,

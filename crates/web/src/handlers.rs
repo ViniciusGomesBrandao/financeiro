@@ -43,7 +43,17 @@ pub(crate) async fn symbol_lookup(
 }
 
 pub async fn overview(State(state): State<AppState>) -> Result<Json<OverviewDto>, AppError> {
-    let snapshot = persistence::portfolio_snapshots::latest(&state.pool).await?;
+    // Fase multi-robô: o motor grava em `robot_portfolio_snapshots`.
+    // Agregamos o último snapshot de cada robô. Fallback na tabela legada
+    // `portfolio_snapshots` só se ainda não houver nenhum robô persistido.
+    let robot_snaps = persistence::robot_portfolio_snapshots::latest_all(&state.pool).await?;
+    let aggregated = aggregate_robot_snapshots(&robot_snaps);
+    let legacy = if aggregated.is_none() {
+        persistence::portfolio_snapshots::latest(&state.pool).await?
+    } else {
+        None
+    };
+
     let closed_positions: Vec<domain::Position> = persistence::positions::list_closed(&state.pool)
         .await?
         .into_iter()
@@ -51,23 +61,10 @@ pub async fn overview(State(state): State<AppState>) -> Result<Json<OverviewDto>
         .collect();
     let performance = analytics::compute_performance(&closed_positions);
 
-    // O snapshot persistido é uma foto do portfólio inteiro (necessário
-    // para o próprio `PortfolioManager` da instância ao vivo, cujo ledger
-    // já exclui posições de teste desde `app::setup::restore_portfolio` —
-    // ver o comentário ali para a causa raiz da contaminação que isso
-    // corrige). Ainda assim, os dois campos abaixo são recalculados aqui a
-    // partir de `closed_positions`/`open_positions` já filtrados, em vez
-    // de confiar direto em `snapshot.realized_pnl`/`realized_pnl_today`:
-    // um snapshot mais antigo (persistido antes do fix em `restore_portfolio`,
-    // ou por um processo que ainda não reiniciou) continuaria contaminado
-    // até o próximo restart, e o dashboard não deveria depender disso para
-    // mostrar o número certo. `cash`/`equity`/`return_pct`/`exposure_ratio`
-    // não sofrem desse problema: derivam só do caixa rastreado
-    // incrementalmente e das posições abertas, nunca de `closed_positions`
-    // agregadas — por isso continuam vindo direto do snapshot.
-    let today = snapshot
+    let today = aggregated
         .as_ref()
         .map(|s| s.timestamp)
+        .or_else(|| legacy.as_ref().map(|s| s.timestamp))
         .unwrap_or_else(chrono::Utc::now);
     let closed_today: Vec<domain::Position> = closed_positions
         .iter()
@@ -77,9 +74,6 @@ pub async fn overview(State(state): State<AppState>) -> Result<Json<OverviewDto>
     let realized_pnl_total = performance.net_pnl;
     let realized_pnl_today = analytics::compute_performance(&closed_today).net_pnl;
 
-    // Mesma lógica: recontamos/recalculamos a partir de `list_open`
-    // filtrado em vez de confiar em `snapshot.open_positions_count`, para
-    // não exibir uma posição de teste como se fosse real.
     let latest_prices = persistence::latest_prices::list_all(&state.pool).await?;
     let price_by_instrument: HashMap<_, _> = latest_prices
         .into_iter()
@@ -101,18 +95,79 @@ pub async fn overview(State(state): State<AppState>) -> Result<Json<OverviewDto>
         })
         .sum();
 
+    let has_portfolio = aggregated.is_some() || legacy.is_some();
+    let cash = aggregated
+        .as_ref()
+        .map(|s| s.cash)
+        .or_else(|| legacy.as_ref().map(|s| s.cash));
+    let equity = aggregated
+        .as_ref()
+        .map(|s| s.equity)
+        .or_else(|| legacy.as_ref().map(|s| s.equity));
+    let return_pct = aggregated
+        .as_ref()
+        .map(|s| s.return_pct)
+        .or_else(|| legacy.as_ref().map(|s| s.return_pct));
+    let exposure_ratio = aggregated
+        .as_ref()
+        .map(|s| s.exposure_ratio)
+        .or_else(|| legacy.as_ref().map(|s| s.exposure_ratio));
+    let as_of = aggregated
+        .as_ref()
+        .map(|s| s.timestamp)
+        .or_else(|| legacy.as_ref().map(|s| s.timestamp));
+
     Ok(Json(OverviewDto {
-        as_of: snapshot.as_ref().map(|s| s.timestamp),
-        cash: snapshot.as_ref().map(|s| s.cash),
-        equity: snapshot.as_ref().map(|s| s.equity),
-        realized_pnl_total: snapshot.as_ref().map(|_| realized_pnl_total),
-        realized_pnl_today: snapshot.as_ref().map(|_| realized_pnl_today),
-        unrealized_pnl: snapshot.as_ref().map(|_| unrealized_pnl),
-        return_pct: snapshot.as_ref().map(|s| s.return_pct),
+        as_of,
+        cash,
+        equity,
+        realized_pnl_total: has_portfolio.then_some(realized_pnl_total),
+        realized_pnl_today: has_portfolio.then_some(realized_pnl_today),
+        unrealized_pnl: has_portfolio.then_some(unrealized_pnl),
+        return_pct,
         max_drawdown: performance.max_drawdown,
-        open_positions_count: snapshot.as_ref().map(|_| open_positions.len() as u32),
-        exposure_ratio: snapshot.as_ref().map(|s| s.exposure_ratio),
+        open_positions_count: has_portfolio.then_some(open_positions.len() as u32),
+        exposure_ratio,
     }))
+}
+
+/// Soma caixa/equity dos robôs e pondera retorno/exposição pelo equity.
+fn aggregate_robot_snapshots(
+    snaps: &[persistence::robot_portfolio_snapshots::RobotPortfolioSnapshot],
+) -> Option<domain::PortfolioSnapshot> {
+    if snaps.is_empty() {
+        return None;
+    }
+    let mut cash = rust_decimal::Decimal::ZERO;
+    let mut equity = rust_decimal::Decimal::ZERO;
+    let mut return_weighted = rust_decimal::Decimal::ZERO;
+    let mut exposure_weighted = rust_decimal::Decimal::ZERO;
+    let mut timestamp = snaps[0].snapshot.timestamp;
+    for s in snaps {
+        cash += s.snapshot.cash;
+        equity += s.snapshot.equity;
+        return_weighted += s.snapshot.return_pct * s.snapshot.equity;
+        exposure_weighted += s.snapshot.exposure_ratio * s.snapshot.equity;
+        if s.snapshot.timestamp > timestamp {
+            timestamp = s.snapshot.timestamp;
+        }
+    }
+    let (return_pct, exposure_ratio) = if equity > rust_decimal::Decimal::ZERO {
+        (return_weighted / equity, exposure_weighted / equity)
+    } else {
+        (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+    };
+    Some(domain::PortfolioSnapshot {
+        timestamp,
+        cash,
+        equity,
+        realized_pnl: rust_decimal::Decimal::ZERO,
+        unrealized_pnl: rust_decimal::Decimal::ZERO,
+        open_positions_count: 0,
+        exposure_ratio,
+        return_pct,
+        realized_pnl_today: rust_decimal::Decimal::ZERO,
+    })
 }
 
 fn is_same_utc_day(a: chrono::DateTime<chrono::Utc>, b: chrono::DateTime<chrono::Utc>) -> bool {
@@ -185,6 +240,7 @@ pub async fn trades(State(state): State<AppState>) -> Result<Json<Vec<TradeDto>>
         .filter(|t| !is_test_strategy(t.strategy_id.as_str()))
         .take(200)
         .map(|trade| TradeDto {
+            id: Some(trade.id),
             symbol: symbols
                 .get(&trade.instrument_id)
                 .cloned()
@@ -201,6 +257,10 @@ pub async fn trades(State(state): State<AppState>) -> Result<Json<Vec<TradeDto>>
             spread_paid: trade.spread_paid,
             slippage_paid: trade.slippage_paid,
             pnl_net: trade.pnl_net,
+            exit_trigger: None,
+            exit_reason: None,
+            entry_direction: None,
+            entry_confidence: None,
         })
         .collect();
     Ok(Json(dtos))

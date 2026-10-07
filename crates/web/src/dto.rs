@@ -45,6 +45,8 @@ pub struct OpenPositionDto {
 
 #[derive(Debug, Serialize)]
 pub struct TradeDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
     pub symbol: String,
     pub strategy_id: String,
     pub side: String,
@@ -58,6 +60,15 @@ pub struct TradeDto {
     pub spread_paid: Decimal,
     pub slippage_paid: Decimal,
     pub pnl_net: Decimal,
+    /// Motivo da saída, quando correlacionável a `risk_decisions` (já persistido).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_trigger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_confidence: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,7 +201,17 @@ pub struct RobotDetailDto {
     pub switches: Vec<StrategySwitchDto>,
     /// P&L líquido acumulado dos trades deste robô (não é equity da conta global).
     pub realized_pnl_curve: Vec<PnlCurvePointDto>,
+    /// Equity isolada do robô ao longo do tempo (snapshots já gravados).
+    pub equity_curve: Vec<EquityCurvePointDto>,
     pub candidate_performance: Vec<StrategyPerformanceDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EquityCurvePointDto {
+    pub at: DateTime<Utc>,
+    pub equity: Decimal,
+    pub cash: Decimal,
+    pub return_pct: Decimal,
 }
 
 #[derive(Debug, Serialize)]

@@ -57,7 +57,7 @@ pub mod strategy;
 pub use catalog::{CatalogError, StrategyCatalogEntry, StrategyCategory, StrategyDescriptor};
 pub use error::CompatibilityError;
 pub use feature_strategy::{FeatureStrategy, FeatureStrategyAdapter};
-pub use instance::{build_registry, InstanceError, StrategyInstanceConfig};
+pub use instance::{build_registry, register_instances, InstanceError, StrategyInstanceConfig};
 pub use position_query::{NoPositions, PositionQuery};
 pub use registry::{check_compatible, StrategyRegistry};
 pub use requirements::StrategyRequirements;

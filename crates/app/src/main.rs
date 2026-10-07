@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use app::{config::AppConfig, pipeline, robot_runtime, setup};
+use app::{config::AppConfig, pipeline, robot_market, robot_runtime, robot_sync, setup};
 use domain::Money;
 use execution::{PaperBroker, PaperBrokerConfig};
 use market_data::{BinanceMarketData, MarketDataProvider};
@@ -36,31 +36,36 @@ async fn main() -> Result<()> {
         .context("resolving runtime config from database")?;
 
     let provider = BinanceMarketData::public();
-    let instruments = setup::load_instruments(&runtime.symbols, &provider, &pool).await?;
-    let instrument_index: HashMap<_, _> = instruments.iter().map(|i| (i.id, i.clone())).collect();
+    let instruments_list = setup::load_instruments(&runtime.symbols, &provider, &pool).await?;
+    let mut instrument_index: HashMap<_, _> =
+        instruments_list.iter().map(|i| (i.id, i.clone())).collect();
 
     let capabilities = provider.capabilities();
-    let available_market_data = capabilities.market_data_kinds.into_iter().collect();
+    let available_market_data: std::collections::HashSet<_> =
+        capabilities.market_data_kinds.into_iter().collect();
     let mut registry = setup::build_strategy_registry(
         &runtime,
         &config,
-        &instruments,
+        &instruments_list,
         &available_market_data,
         &pool,
     )
     .await?;
 
-    if registry.is_empty() {
+    if registry.is_empty() && runtime.running_robots.is_empty() {
         anyhow::bail!(
             "no strategy was successfully registered against any instrument; check \
              ENABLED_STRATEGIES / ENABLED_SYMBOLS / operational robots and compatibility warnings"
         );
     }
 
-    let robots = setup::build_robot_contexts(&runtime, &instruments, &config)
+    let mut robots = setup::build_robot_contexts(&runtime, &instruments_list, &config)
         .context("building robot contexts")?;
+    // Permite subir o motor sem robôs (só dashboard): hot-reload ativa depois.
     if robots.is_empty() {
-        anyhow::bail!("no robot contexts resolved; nothing to trade");
+        tracing::warn!(
+            "no robot contexts at startup; waiting for operational robots via hot-reload"
+        );
     }
     for robot in &robots {
         tracing::info!(
@@ -92,39 +97,51 @@ async fn main() -> Result<()> {
 
     let mut portfolios = setup::restore_robot_portfolios(&pool, &robots).await?;
     let mut tracker = setup::build_active_strategy_tracker();
-    let mut market_views = app::robot_market::build_robot_market_views(&robots);
+    let mut market_views = robot_market::build_robot_market_views(&robots);
 
-    pipeline::warm_up_robots(
-        &mut registry,
-        &provider,
-        &instrument_index,
-        &robots,
-        &mut market_views,
-        config.warmup_candles,
-    )
-    .await?;
+    if !robots.is_empty() {
+        pipeline::warm_up_robots(
+            &mut registry,
+            &provider,
+            &instrument_index,
+            &robots,
+            &mut market_views,
+            config.warmup_candles,
+        )
+        .await?;
 
-    pipeline::seed_judge_after_warmup(
-        &instrument_index,
-        &robots,
-        &mut tracker,
-        &portfolios,
-        &market_views,
-        &pool,
-    )
-    .await?;
+        pipeline::seed_judge_after_warmup(
+            &instrument_index,
+            &robots,
+            &mut tracker,
+            &portfolios,
+            &market_views,
+            &pool,
+        )
+        .await?;
+    }
 
-    let groups = robot_runtime::group_instruments_by_timeframe(&robots, &instruments);
-    let mut receivers = Vec::with_capacity(groups.len());
+    let (hub, rx) = robot_runtime::MarketEventHub::new();
+    let mut stream_keys = robot_sync::initial_stream_keys(&robots);
+    let groups = robot_runtime::group_instruments_by_timeframe(&robots, &instruments_list);
     for (timeframe, group_instruments) in groups {
         tracing::info!(
             timeframe = %timeframe,
             symbols = ?group_instruments.iter().map(|i| i.symbol.to_string()).collect::<Vec<_>>(),
             "opening market-data stream"
         );
-        receivers.push(provider.stream(group_instruments, timeframe).await?);
+        let recv = provider.stream(group_instruments, timeframe).await?;
+        hub.attach(recv);
     }
-    let rx = robot_runtime::merge_market_event_streams(receivers);
+
+    let hot_reload = robot_sync::HotReload {
+        provider: &provider,
+        hub: &hub,
+        stream_keys: &mut stream_keys,
+        available_market_data: available_market_data.clone(),
+        warmup_candles: config.warmup_candles,
+        config: &config,
+    };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -136,8 +153,8 @@ async fn main() -> Result<()> {
 
     pipeline::run(
         rx,
-        &instrument_index,
-        &robots,
+        &mut instrument_index,
+        &mut robots,
         &mut registry,
         &mut tracker,
         &risk_engine,
@@ -145,6 +162,7 @@ async fn main() -> Result<()> {
         &mut portfolios,
         &mut market_views,
         &pool,
+        Some(hot_reload),
         shutdown_rx,
     )
     .await?;

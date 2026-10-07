@@ -108,6 +108,45 @@ pub fn build_registry(
     Ok(registry)
 }
 
+/// Registra instâncias adicionais num registry já existente (hot-load de
+/// robô). Ids já presentes são ignorados — seguro chamar em sync periódico.
+pub fn register_instances(
+    registry: &mut StrategyRegistry,
+    configs: &[StrategyInstanceConfig],
+    instruments: &[Instrument],
+    available_market_data: &HashSet<MarketDataKind>,
+) -> Result<(), InstanceError> {
+    for config in configs {
+        if registry.get(&config.id).is_some() {
+            continue;
+        }
+
+        let strategy = catalog::build(&config.kind, config.id.clone())?;
+        let selected: Vec<Instrument> = instruments
+            .iter()
+            .filter(|instrument| {
+                config
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol == instrument.symbol.as_str())
+            })
+            .cloned()
+            .collect();
+
+        if selected.is_empty() {
+            tracing::warn!(
+                strategy_id = %config.id,
+                kind = %config.kind,
+                "no loaded instrument matches this strategy instance's symbols; skipping registration"
+            );
+            continue;
+        }
+
+        registry.register(strategy, &selected, available_market_data)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
